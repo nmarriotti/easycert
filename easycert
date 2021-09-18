@@ -1,0 +1,235 @@
+#!/bin/bash
+# easycert
+# Creates a Certificate Authority and Signed Certificates
+# Author: Nick Marriotti
+# Date: 9/18/2021
+
+HOMEDIR=/opt/easycert
+CONFIG=$HOMEDIR/conf/easycert.conf
+if [ -f $CONFIG ]; then
+	source $CONFIG
+else
+	echo "$CONFIG not found, exiting."
+	exit 1
+fi
+
+CADIR=$HOMEDIR/CA
+CERTDIR=/opt/easycert/certificates
+
+function create_private_key {
+	# Create private key
+	openssl genrsa -passout pass:$PASSPHRASE -out $1 2048 2> /dev/null
+}
+
+function set_cn {
+cat << EOF
+
+
+The Common Name (AKA CN) represents the server name protected by the SSL certificate.
+The certificate is valid only if the request hostname matches the certificate common name.
+
+EOF
+        read -p "Set CN: " CN
+
+        if [[ $CN = "" ]]; then
+                echo -e "\nCN not provided, exiting..."
+                exit 1
+        fi
+}
+
+function create_certificate {
+	set_cn
+
+	# Create certificate
+	openssl req \
+		-x509 \
+		-new \
+		-nodes \
+		-key "$CADIR/$PREFIX.key" \
+		-passin pass:$PASSPHRASE \
+		-sha256 \
+		-days $1 \
+		-subj "/C=$COUNTRY/ST=$STATE/L=$CITY/O=$ORG/OU=$ORG_UNIT/CN=$CN/emailAddress=$EMAIL" \
+		-out "$CADIR/$PREFIX.crt"
+
+	if [ $? -eq 0 ]; then
+		# View certificate
+		openssl x509 -in "$CADIR/$PREFIX.crt" -text -noout
+	else
+		exit 1
+	fi
+
+	echo ""
+	echo "Root CA created successfully!"
+	echo "Private key: $CADIR/$PREFIX.key (DO NOT DISTRIBUTE)"
+	echo "Certificate: $CADIR/$PREFIX.crt"
+	echo ""
+}
+
+function set_prefix {
+	# Set filename used for saving key and certificate
+	cat << EOF
+
+Before creating the certificate, a filename prefix is needed.
+The prefix is used to assign filenames to the files that will be
+created.
+
+The file extensions will be added automatically.
+
+EOF
+
+	read -p "Set prefix: " PREFIX
+	
+	if [[ $PREFIX = "" ]]; then
+		echo -e "\nFilename prefix not specified, exiting..."
+		exit 1
+	fi
+
+	if [ -f "$CADIR/$PREFIX.key" ] || [ -f "$CADIR/$PREFIX.crt" ]; then
+		echo "This certificate authority '$PREFIX' already exists!"
+		read -p "Do you want to overwrite it (y/n)? : " ACTION
+		case $ACTION in
+			"y")
+				;;
+			"n")
+				exit 0
+		esac
+	fi
+}
+
+function set_passphrase {
+	RETRIES=3
+	while [[ $RETRIES -gt 0 ]]
+	do
+		read -sp "Set passphrase: " PASSPHRASE
+		echo ""
+		read -sp "Confirm passphrase: " PASSPHRASE_CONFIRM
+
+		if [[ $PASSPHRASE != $PASSPHRASE_CONFIRM ]]; then
+			echo -e "\nPassphrase does not match!\n"
+			RETRIES=$(expr $RETRIES - 1)
+		else
+			break
+		fi
+	done
+
+	if [ $RETRIES -eq 0 ]; then
+		echo -e "\nNumber of attempts exceeded, exiting...\n"
+		exit 1
+	fi
+}
+
+function create_root_ca {
+	set_prefix
+	set_passphrase
+	create_private_key "$CADIR/$PREFIX.key"
+	create_certificate $DAYS_CA_VALID
+}
+
+function create_csr {
+	openssl req \
+		-new \
+		-key $1 \
+		-subj "/C=$COUNTRY/ST=$STATE/L=$CITY/O=$ORG/OU=$ORG_UNIT/CN=$CN/emailAddress=$EMAIL" \
+		-out $2
+}
+
+function create_extfile {
+	echo "Creating certificate signing request for $CN"
+	cat > "$CERTDIR/$CN/$CN.ext" << EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = $CN
+EOF
+}
+
+function create_signed_certificate {
+	set_cn
+
+	mkdir $CERTDIR/$CN 2> /dev/null
+	
+	create_private_key "$CERTDIR/$CN/$CN.key"
+
+	echo -e "\nList of available certificate authorities:"
+	find $CADIR -type f \( -name "*.crt" -o -name "*.key" \)
+	echo ""
+	read -p "Root CA private key file: " SIGNER_KEY
+	read -p "Root CA certificate file: " SIGNER_CERT
+	
+	if [ ! -f $SIGNER_KEY ] || [ ! -f $SIGNER_CERT ]; then
+		echo "Signing key and/or certificate not found ..."
+		exit 1
+	fi
+
+	create_csr "$CERTDIR/$CN/$CN.key" "$CERTDIR/$CN/$CN.csr"
+	create_extfile
+	
+	read -sp "Root CA passphrase: " CA_PASSHRASE
+	echo ""
+	set_passphrase
+
+	openssl x509 \
+		-req \
+		-in "$CERTDIR/$CN/$CN.csr" \
+		-CA $SIGNER_CERT \
+		-CAkey $SIGNER_KEY \
+		-CAcreateserial \
+		-out "$CERTDIR/$CN/$CN.crt" \
+		-days $DAYS_CERT_VALID \
+		-sha256 \
+		-extfile "$CERTDIR/$CN/$CN.ext" \
+		-passin pass:$CA_PASSPHRASE \
+	
+	if [ $? -eq 0 ]; then
+		# View certificate
+		openssl x509 -in "$CERTDIR/$CN/$CN.crt" -text -noout
+	else
+		exit 1
+	fi
+
+	#echo "Creating certificate bundle..."
+	cat "$CERTDIR/$CN/$CN.crt" $SIGNER_CERT > "$CERTDIR/$CN/$CN-ca.bundle"
+
+	
+	#echo "Creating PKCS12 (.pfx/.p12)"
+	openssl pkcs12 -export -inkey "$CERTDIR/$CN/$CN.key" -in "$CERTDIR/$CN/$CN-ca.bundle" -name $CN -password pass:"" -out "$CERTDIR/$CN/$CN.p12"
+
+	echo ""
+	echo "Certificate created successfully!"
+	echo "Private key: $CERTDIR/$CN/$CN.key (DO NOT DISTRIBUTE)"
+	echo "Certificate: $CERTDIR/$CN/$CN.crt"
+	echo "Bundle: $CERTDIR/$CN/$CN-ca.bundle"
+	echo "PKCS12: $CERTDIR/$CN/$CN.p12"
+	
+}
+
+while true
+do
+cat << EOF
+
+This script is used to generate a Root CA and signed certificates.
+
+    1. Create Root CA
+    2. Create Signed Certificate
+    3. Exit
+
+EOF
+	read -p "Select an option: " ACTION
+	case $ACTION in
+		"1")			
+			create_root_ca 
+			;;
+		"2")
+			create_signed_certificate
+			;;
+		"3")
+			echo "Goodbye!"
+			exit 1
+			;;
+		*)
+			echo "Invalid option"
+	esac
+done
