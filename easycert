@@ -92,7 +92,7 @@ EOF
 			"y")
 				;;
 			"n")
-				exit 0
+				return
 		esac
 	fi
 }
@@ -143,12 +143,24 @@ keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
 subjectAltName = @alt_names
 [alt_names]
 DNS.1 = $CN
+DNS.2 = $CN.*
 EOF
 }
 
 function create_signed_certificate {
 	set_cn
 
+	if [ -f "$CERTDIR/$CN/$CN.key" ] || [ -f "$CERTDIR/$CN/$CN.crt" ]; then
+		echo "This certificate '$CN' already exists!"
+		read -p "Do you want to overwrite it (y/n)? : " ACTION
+		case $ACTION in
+			"y")
+				rm -rf "$CERTDIR/$CN"
+				;;
+			"n")
+				return
+		esac
+	fi
 	mkdir $CERTDIR/$CN 2> /dev/null
 	
 	create_private_key "$CERTDIR/$CN/$CN.key"
@@ -195,14 +207,18 @@ function create_signed_certificate {
 
 	
 	#echo "Creating PKCS12 (.pfx/.p12)"
-	openssl pkcs12 -export -inkey "$CERTDIR/$CN/$CN.key" -in "$CERTDIR/$CN/$CN-ca.bundle" -name $CN -password pass:"" -out "$CERTDIR/$CN/$CN.p12"
+	openssl pkcs12 -export -inkey "$CERTDIR/$CN/$CN.key" -in "$CERTDIR/$CN/$CN-ca.bundle" -name $CN -password pass:$PASSPHRASE -out "$CERTDIR/$CN/$CN.p12"
 
+	# Create JKS keystore
+	keytool -storepass $PASSPHRASE -keypass $PASSPHRASE -srcstorepass $PASSPHRASE -importkeystore -srckeystore "$CERTDIR/$CN/$CN.p12" -srcstoretype PKCS12 -destkeystore "$CERTDIR/$CN/$CN.jks" -deststoretype JKS
+	
 	echo ""
 	echo "Certificate created successfully!"
 	echo "Private key: $CERTDIR/$CN/$CN.key (DO NOT DISTRIBUTE)"
 	echo "Certificate: $CERTDIR/$CN/$CN.crt"
 	echo "Bundle: $CERTDIR/$CN/$CN-ca.bundle"
 	echo "PKCS12: $CERTDIR/$CN/$CN.p12"
+	echo "JKS KEYSTORE: $CERTDIR/$CN/$CN.jks"
 	
 }
 
